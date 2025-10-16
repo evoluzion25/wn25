@@ -1,13 +1,28 @@
 #requires -Version 5.1
 [CmdletBinding()]
 param(
-  [switch]$NoReboot
+  [switch]$NoReboot,
+  [string]$LogDir,
+  [switch]$SkipConnectivityCheck
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+# Determine log directory (default to script folder or temp)
+$scriptRoot = Split-Path -Parent $PSCommandPath
+if ([string]::IsNullOrWhiteSpace($LogDir)) {
+  $LogDir = if ($scriptRoot) { $scriptRoot } else { $env:TEMP }
+}
+if (-not (Test-Path $LogDir)) { New-Item -ItemType Directory -Force -Path $LogDir | Out-Null }
+$global:WN25_LogPath = Join-Path $LogDir ("install-{0}.log" -f (Get-Date -Format 'yyyyMMdd-HHmmss'))
+
+try {
+  Start-Transcript -Path $global:WN25_LogPath -Force | Out-Null
+} catch {}
+
 Write-Host "==> Windows Workstation Provisioning starting..." -ForegroundColor Cyan
+Write-Host ("Logging to: {0}" -f $global:WN25_LogPath) -ForegroundColor DarkGray
 
 # Ensure running as Administrator
 $currentIdentity = [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -24,15 +39,26 @@ if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
   Write-Host "WinGet not found. Please ensure Windows 11/Windows 10 with App Installer." -ForegroundColor Yellow
 }
 
-function Install-WinGetPackage {
-  param(
-    [Parameter(Mandatory=$true)][string]$Id,
-    [string]$Name,
-    [string]$SourceArgs = ""
-  )
-  $display = if ($Name) { $Name } else { $Id }
-  Write-Host "Installing $display..."
-  winget install -e --id $Id -h --accept-source-agreements --accept-package-agreements $SourceArgs
+# Basic connectivity check (optional)
+function Test-InternetConnection {
+  param([int]$TimeoutSec = 8)
+  try {
+    $r = Invoke-WebRequest -Uri 'https://www.msftconnecttest.com/connecttest.txt' -UseBasicParsing -TimeoutSec $TimeoutSec
+    if ($r.StatusCode -eq 200 -and $r.Content -match 'Microsoft Connect Test') { return $true }
+  } catch {}
+  try {
+    Test-Connection -ComputerName 8.8.8.8 -Count 1 -Quiet -ErrorAction Stop
+  } catch { return $false }
+}
+
+if (-not $SkipConnectivityCheck) {
+  Write-Host "Checking internet connectivity..." -ForegroundColor Cyan
+  $online = Test-InternetConnection
+  if (-not $online) {
+    Write-Host "No internet connection detected. The installer relies on online sources (winget, npm)." -ForegroundColor Yellow
+    $resp = Read-Host "Continue anyway? (y/N)"
+    if ($resp -notmatch '^(y|Y)') { Write-Host "Aborting per user choice."; goto :cleanup }
+  }
 }
 
 # Create base folders
@@ -131,3 +157,6 @@ if (-not $NoReboot) {
   $key = Read-Host
   if ($key -match '^(y|Y)') { Restart-Computer }
 }
+
+:cleanup
+try { Stop-Transcript | Out-Null } catch {}
